@@ -1,0 +1,27 @@
+--- ../v3/pkg/application/webview_window_windows.go
++++ ../v3/pkg/application/webview_window_windows.go
+@@ -286,20 +286,24 @@
+ 
+ 	cm, err := w.chromium.GetCookieManager()
+ 	if err != nil {
++		fmt.Println("Error getting cookie manager:", err)
+ 		return nil
+ 	}
+ 	defer cm.Release()
+ 
+ 	list, err := cm.GetCookies(url)
+ 	if err != nil {
++		fmt.Println("Error getting cookies list:", err)
+ 		return nil
+ 	}
+ 	defer list.Release()
+ 
+ 	count, err := list.GetCount()
+ 	if err != nil {
++		fmt.Println("Error getting cookie count:", err)
+ 		return nil
+ 	}
++	fmt.Printf("Cookie list count: %d\n", count)
+ 
+ 	var cookies []*http.Cookie
+ 	for i := uint32(0); i < count; i++ {

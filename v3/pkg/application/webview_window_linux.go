@@ -4,6 +4,7 @@ package application
 
 import (
 	"fmt"
+	"net/http"
 	"time"
 
 	"unsafe"
@@ -50,6 +51,10 @@ type linuxWebviewWindow struct {
 var (
 	registered bool = false // avoid 'already registered message' about 'wails://'
 )
+
+func (w *linuxWebviewWindow) getCookies(url string) []*http.Cookie {
+	return nil
+}
 
 func (w *linuxWebviewWindow) endDrag(button uint, x, y int) {
 	w.drag.XRoot = 0.0

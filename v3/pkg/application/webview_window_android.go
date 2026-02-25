@@ -2,7 +2,10 @@
 
 package application
 
-import "unsafe"
+import (
+	"net/http"
+	"unsafe"
+)
 
 // androidWebviewWindow implements the webviewWindowImpl interface for Android
 type androidWebviewWindow struct {
@@ -22,6 +25,10 @@ func (w *androidWebviewWindow) close() {}
 
 func (w *androidWebviewWindow) destroy() {
 	w.parent.markAsDestroyed()
+}
+
+func (w *androidWebviewWindow) getCookies(url string) []*http.Cookie {
+	return nil
 }
 
 func (w *androidWebviewWindow) execJS(js string) {

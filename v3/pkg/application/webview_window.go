@@ -2,6 +2,7 @@ package application
 
 import (
 	"fmt"
+	"net/http"
 	"runtime"
 	"slices"
 	"strings"
@@ -34,6 +35,7 @@ type LRTB struct {
 
 type (
 	webviewWindowImpl interface {
+		getCookies(url string) []*http.Cookie
 		setTitle(title string)
 		setSize(width, height int)
 		setAlwaysOnTop(alwaysOnTop bool)
@@ -590,6 +592,14 @@ func (w *WebviewWindow) SetMaxSize(maxWidth, maxHeight int) Window {
 		})
 	}
 	return w
+}
+
+// GetCookies returns the cookies for the given URL
+func (w *WebviewWindow) GetCookies(url string) []*http.Cookie {
+	if w.impl == nil || w.isDestroyed() {
+		return nil
+	}
+	return w.impl.getCookies(url)
 }
 
 // ExecJS executes the given javascript in the context of the window.

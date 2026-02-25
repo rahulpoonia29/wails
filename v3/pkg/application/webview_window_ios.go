@@ -16,6 +16,7 @@ void ios_window_set_background_color(void* viewController, unsigned char r, unsi
 */
 import "C"
 import (
+	"net/http"
 	"unsafe"
 )
 
@@ -37,6 +38,10 @@ func (w *iosWebviewWindow) destroy() {
 		w.nativeHandle = nil
 	}
 	w.parent.markAsDestroyed()
+}
+
+func (w *iosWebviewWindow) getCookies(url string) []*http.Cookie {
+	return nil
 }
 
 func (w *iosWebviewWindow) execJS(js string) {
@@ -142,13 +147,13 @@ func (w *iosWebviewWindow) setAbsolutePosition(_ int, _ int) {}
 func (w *iosWebviewWindow) setAlwaysOnTop(_ bool) {}
 
 func (w *iosWebviewWindow) setBackgroundColour(col RGBA) {
-    if w.nativeHandle == nil {
-        return
-    }
-    C.ios_window_set_background_color(
-        w.nativeHandle,
-        C.uchar(col.Red), C.uchar(col.Green), C.uchar(col.Blue), C.uchar(col.Alpha),
-    )
+	if w.nativeHandle == nil {
+		return
+	}
+	C.ios_window_set_background_color(
+		w.nativeHandle,
+		C.uchar(col.Red), C.uchar(col.Green), C.uchar(col.Blue), C.uchar(col.Alpha),
+	)
 }
 
 func (w *iosWebviewWindow) setEnabled(_ bool) {}

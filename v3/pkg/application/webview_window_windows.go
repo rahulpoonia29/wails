@@ -3,6 +3,7 @@
 package application
 
 import (
+	"net/http"
 	"errors"
 	"fmt"
 	"net/url"
@@ -35,6 +36,12 @@ var edgeMap = map[string]uintptr{
 	"sw-resize": w32.HTBOTTOMLEFT,
 	"w-resize":  w32.HTLEFT,
 	"nw-resize": w32.HTTOPLEFT,
+}
+
+
+type cookieRequest struct {
+	url string
+	resultChan chan []*http.Cookie
 }
 
 type windowsWebviewWindow struct {
@@ -276,6 +283,39 @@ func (w *windowsWebviewWindow) setMinSize(width, height int) {
 func (w *windowsWebviewWindow) setMaxSize(width, height int) {
 	w.parent.options.MaxWidth = width
 	w.parent.options.MaxHeight = height
+}
+
+func (w *windowsWebviewWindow) getCookies(url string) []*http.Cookie {
+	if w.chromium == nil {
+		return nil
+	}
+
+	// Because GetCookies might be async and crash if called from a blocking WndProc,
+	// AND because the COM thread is the window thread,
+	// Let's try w.chromium.GetCookieManager() inside a goroutine and use InvokeSync? No, InvokeSync uses the main thread.
+	// We need to run on the window thread but NOT block it!
+	// Is there a way to use go-webview2's GetCookies safely?
+	// ACTUALLY, "GetCookies" does NOT return a value synchronously!
+	// Wait, if it does, how does go-webview2 do it?
+	// go-webview2 defines: func (i *ICoreWebView2CookieManager) GetCookies(uri string) (*ICoreWebView2CookieList, error)
+	// If it was async, it would take a callback. But it returns the list directly!
+	// It must be pumping messages.
+	// The problem is that Wails v3 ALSO pumps messages.
+	// If Wails v3 calls this from WndProc, maybe the re-entrant message pump corrupts Wails state and causes a segfault.
+
+	// WHAT IF I DON'T USE SENDMESSAGE?
+	// What if I use PostMessage? But PostMessage is async and I need to return the cookies!
+	// We can use PostMessage, wait on a channel in the goroutine!
+	
+	req := &cookieRequest{
+		url: url,
+		resultChan: make(chan []*http.Cookie, 1),
+	}
+	
+	// Use w32.PostMessage which does NOT block the UI thread while we wait.
+	w32.PostMessage(w.hwnd, w32.WM_APP + 100, uintptr(unsafe.Pointer(req)), 0)
+
+	return <-req.resultChan
 }
 
 func (w *windowsWebviewWindow) execJS(js string) {
@@ -1563,6 +1603,61 @@ func (w *windowsWebviewWindow) WndProc(msg uint32, wparam, lparam uintptr) uintp
 				doResize()
 			}
 		}
+		return 0
+
+		case w32.WM_APP + 100:
+		// Handle custom cookie request
+		req := (*cookieRequest)(unsafe.Pointer(wparam))
+		
+		cm, err := w.chromium.GetCookieManager()
+		if err != nil {
+			fmt.Println("Error getting cookie manager inside WndProc:", err)
+			req.resultChan <- nil
+			return 0
+		}
+		defer cm.Release()
+
+		list, err := cm.GetCookies(req.url)
+		if err != nil {
+			req.resultChan <- nil
+			return 0
+		}
+		defer list.Release()
+
+		count, err := list.GetCount()
+		if err != nil {
+			req.resultChan <- nil
+			return 0
+		}
+
+		var found []*http.Cookie
+		for i := uint32(0); i < count; i++ {
+			cookie, err := list.GetItem(i)
+			if err != nil {
+				continue
+			}
+
+			name, _ := cookie.GetName()
+			value, _ := cookie.GetValue()
+			domain, _ := cookie.GetDomain()
+			path, _ := cookie.GetPath()
+			expires, _ := cookie.GetExpires()
+			isHttpOnly, _ := cookie.GetIsHttpOnly()
+			isSecure, _ := cookie.GetIsSecure()
+
+			found = append(found, &http.Cookie{
+				Name:     name,
+				Value:    value,
+				Domain:   domain,
+				Path:     path,
+				Expires:  time.Unix(int64(expires), 0),
+				HttpOnly: isHttpOnly,
+				Secure:   isSecure,
+			})
+			cookie.Release()
+		}
+		
+		req.resultChan <- found
 		return 0
 
 	case w32.WM_GETMINMAXINFO:

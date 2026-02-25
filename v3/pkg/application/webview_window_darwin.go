@@ -863,6 +863,7 @@ static void setContentProtection(void *nsWindow, bool enabled) {
 import "C"
 import (
 	"fmt"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -1092,6 +1093,10 @@ func (w *macosWebviewWindow) restoreWindow() {
 
 func (w *macosWebviewWindow) setEnabled(enabled bool) {
 	C.windowSetEnabled(w.nsWindow, C.bool(enabled))
+}
+
+func (w *macosWebviewWindow) getCookies(url string) []*http.Cookie {
+	return nil
 }
 
 func (w *macosWebviewWindow) execJS(js string) {
