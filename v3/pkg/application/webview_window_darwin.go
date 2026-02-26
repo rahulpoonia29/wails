@@ -14,6 +14,193 @@ package application
 #import <AppKit/AppKit.h>
 #import "webview_window_darwin_drag.h"
 
+extern void cookieRequestCallback(unsigned int requestID, char** names, char** values, char** domains, char** paths, double* expires, bool* httpOnly, bool* secure, int count);
+
+typedef struct CookieResult {
+    char **names;
+    char **values;
+    char **domains;
+    char **paths;
+    double *expires;
+    bool *httpOnly;
+    bool *secure;
+    int count;
+} CookieResult;
+
+static bool cookie_domain_matches(NSString *cookieDomain, NSString *host) {
+    if (cookieDomain == nil || host == nil) {
+        return false;
+    }
+    NSString *domain = [cookieDomain lowercaseString];
+    NSString *lowerHost = [host lowercaseString];
+    if ([domain hasPrefix:@"."]) {
+        domain = [domain substringFromIndex:1];
+        return [lowerHost isEqualToString:domain] || [lowerHost hasSuffix:[@"." stringByAppendingString:domain]];
+    }
+    return [lowerHost isEqualToString:domain];
+}
+
+static bool cookie_path_matches(NSString *cookiePath, NSString *requestPath) {
+    NSString *path = (cookiePath != nil && cookiePath.length > 0) ? cookiePath : @"/";
+    NSString *reqPath = (requestPath != nil && requestPath.length > 0) ? requestPath : @"/";
+    return [reqPath hasPrefix:path];
+}
+
+static bool cookie_matches_url(NSHTTPCookie *cookie, NSURL *url) {
+    if (url == nil) {
+        return true;
+    }
+    NSString *scheme = url.scheme ? [url.scheme lowercaseString] : @"";
+    if (cookie.secure && ![scheme isEqualToString:@"https"] && ![scheme isEqualToString:@"wss"]) {
+        return false;
+    }
+    if (!cookie_domain_matches(cookie.domain, url.host)) {
+        return false;
+    }
+    if (!cookie_path_matches(cookie.path, url.path)) {
+        return false;
+    }
+    return true;
+}
+
+static void freeCookieResult(void *ptr);
+
+static void* buildCookieResult(NSArray<NSHTTPCookie*> *cookies) {
+    CookieResult *result = (CookieResult*)malloc(sizeof(CookieResult));
+    if (result == NULL) {
+        return NULL;
+    }
+
+    NSUInteger count = cookies.count;
+    result->count = (int)count;
+
+    if (count == 0) {
+        result->names = NULL;
+        result->values = NULL;
+        result->domains = NULL;
+        result->paths = NULL;
+        result->expires = NULL;
+        result->httpOnly = NULL;
+        result->secure = NULL;
+        return result;
+    }
+
+    result->names = (char**)calloc(count, sizeof(char*));
+    result->values = (char**)calloc(count, sizeof(char*));
+    result->domains = (char**)calloc(count, sizeof(char*));
+    result->paths = (char**)calloc(count, sizeof(char*));
+    result->expires = (double*)calloc(count, sizeof(double));
+    result->httpOnly = (bool*)calloc(count, sizeof(bool));
+    result->secure = (bool*)calloc(count, sizeof(bool));
+
+    if (result->names == NULL || result->values == NULL || result->domains == NULL || result->paths == NULL ||
+        result->expires == NULL || result->httpOnly == NULL || result->secure == NULL) {
+        freeCookieResult(result);
+        return NULL;
+    }
+
+    for (NSUInteger i = 0; i < count; i++) {
+        NSHTTPCookie *cookie = cookies[i];
+        result->names[i] = strdup(cookie.name.UTF8String ?: "");
+        result->values[i] = strdup(cookie.value.UTF8String ?: "");
+        result->domains[i] = strdup(cookie.domain.UTF8String ?: "");
+        result->paths[i] = strdup(cookie.path.UTF8String ?: "");
+        result->httpOnly[i] = cookie.HTTPOnly ? true : false;
+        result->secure[i] = cookie.secure ? true : false;
+        if (cookie.expiresDate != nil) {
+            result->expires[i] = [cookie.expiresDate timeIntervalSince1970];
+        } else {
+            result->expires[i] = -1.0;
+        }
+    }
+
+    return result;
+}
+
+static void freeCookieResult(void *ptr) {
+    if (ptr == NULL) {
+        return;
+    }
+    CookieResult *result = (CookieResult*)ptr;
+    if (result->names != NULL) {
+        for (int i = 0; i < result->count; i++) {
+            free(result->names[i]);
+        }
+        free(result->names);
+    }
+    if (result->values != NULL) {
+        for (int i = 0; i < result->count; i++) {
+            free(result->values[i]);
+        }
+        free(result->values);
+    }
+    if (result->domains != NULL) {
+        for (int i = 0; i < result->count; i++) {
+            free(result->domains[i]);
+        }
+        free(result->domains);
+    }
+    if (result->paths != NULL) {
+        for (int i = 0; i < result->count; i++) {
+            free(result->paths[i]);
+        }
+        free(result->paths);
+    }
+    if (result->expires != NULL) {
+        free(result->expires);
+    }
+    if (result->httpOnly != NULL) {
+        free(result->httpOnly);
+    }
+    if (result->secure != NULL) {
+        free(result->secure);
+    }
+    free(result);
+}
+
+static void cookieRequestForWindow(void *window, unsigned int requestID, const char *url) {
+    @autoreleasepool {
+        WebviewWindow *nsWindow = (WebviewWindow*)window;
+        WKWebView *webView = nsWindow.webView;
+        if (webView == nil) {
+            cookieRequestCallback(requestID, NULL, NULL, NULL, NULL, NULL, NULL, NULL, -1);
+            return;
+        }
+
+        WKWebsiteDataStore *store = webView.configuration.websiteDataStore;
+        WKHTTPCookieStore *cookieStore = store.httpCookieStore;
+        if (cookieStore == nil) {
+            cookieRequestCallback(requestID, NULL, NULL, NULL, NULL, NULL, NULL, NULL, -1);
+            return;
+        }
+
+        NSString *urlString = (url != NULL && strlen(url) > 0) ? [NSString stringWithUTF8String:url] : nil;
+        NSURL *filterURL = urlString != nil ? [NSURL URLWithString:urlString] : nil;
+
+        [cookieStore getAllCookies:^(NSArray<NSHTTPCookie*> *cookies) {
+            NSArray<NSHTTPCookie*> *resultCookies = cookies;
+            if (filterURL != nil) {
+                NSMutableArray<NSHTTPCookie*> *filtered = [NSMutableArray arrayWithCapacity:cookies.count];
+                for (NSHTTPCookie *cookie in cookies) {
+                    if (cookie_matches_url(cookie, filterURL)) {
+                        [filtered addObject:cookie];
+                    }
+                }
+                resultCookies = filtered;
+            }
+            void *payload = buildCookieResult(resultCookies);
+            if (payload == NULL) {
+                cookieRequestCallback(requestID, NULL, NULL, NULL, NULL, NULL, NULL, NULL, -1);
+                return;
+            }
+            CookieResult *result = (CookieResult*)payload;
+            cookieRequestCallback(requestID, result->names, result->values, result->domains, result->paths,
+                                  result->expires, result->httpOnly, result->secure, result->count);
+            freeCookieResult(payload);
+        }];
+    }
+}
+
 struct WebviewPreferences {
     bool *TabFocusesLinks;
     bool *TextInteractionEnabled;
@@ -866,6 +1053,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/wailsapp/wails/v3/internal/assetserver"
@@ -877,6 +1065,89 @@ import (
 type macosWebviewWindow struct {
 	nsWindow unsafe.Pointer
 	parent   *WebviewWindow
+}
+
+type macosCookieResult struct {
+	cookies []*http.Cookie
+}
+
+var macosCookieRequests = struct {
+	mu     sync.Mutex
+	nextID uint
+	store  map[uint]chan macosCookieResult
+}{
+	store: map[uint]chan macosCookieResult{},
+}
+
+func newMacosCookieRequest() (uint, chan macosCookieResult) {
+	macosCookieRequests.mu.Lock()
+	defer macosCookieRequests.mu.Unlock()
+	macosCookieRequests.nextID++
+	id := macosCookieRequests.nextID
+	ch := make(chan macosCookieResult, 1)
+	macosCookieRequests.store[id] = ch
+	return id, ch
+}
+
+func removeMacosCookieRequest(id uint) {
+	macosCookieRequests.mu.Lock()
+	defer macosCookieRequests.mu.Unlock()
+	delete(macosCookieRequests.store, id)
+}
+
+func fetchMacosCookieChannel(id uint) (chan macosCookieResult, bool) {
+	macosCookieRequests.mu.Lock()
+	defer macosCookieRequests.mu.Unlock()
+	ch, ok := macosCookieRequests.store[id]
+	return ch, ok
+}
+
+//export cookieRequestCallback
+func cookieRequestCallback(requestID C.uint, names **C.char, values **C.char, domains **C.char, paths **C.char, expires *C.double, httpOnly *C.bool, secure *C.bool, count C.int) {
+	ch, ok := fetchMacosCookieChannel(uint(requestID))
+	if !ok {
+		return
+	}
+
+	length := int(count)
+	if length < 0 {
+		ch <- macosCookieResult{cookies: nil}
+		return
+	}
+	if length == 0 {
+		ch <- macosCookieResult{cookies: []*http.Cookie{}}
+		return
+	}
+	if names == nil || values == nil || domains == nil || paths == nil || expires == nil || httpOnly == nil || secure == nil {
+		ch <- macosCookieResult{cookies: nil}
+		return
+	}
+
+	nameSlice := (*[1 << 30]*C.char)(unsafe.Pointer(names))[:length:length]
+	valueSlice := (*[1 << 30]*C.char)(unsafe.Pointer(values))[:length:length]
+	domainSlice := (*[1 << 30]*C.char)(unsafe.Pointer(domains))[:length:length]
+	pathSlice := (*[1 << 30]*C.char)(unsafe.Pointer(paths))[:length:length]
+	expiresSlice := (*[1 << 30]C.double)(unsafe.Pointer(expires))[:length:length]
+	httpOnlySlice := (*[1 << 30]C.bool)(unsafe.Pointer(httpOnly))[:length:length]
+	secureSlice := (*[1 << 30]C.bool)(unsafe.Pointer(secure))[:length:length]
+
+	cookies := make([]*http.Cookie, 0, length)
+	for i := 0; i < length; i++ {
+		cookie := &http.Cookie{
+			Name:     C.GoString(nameSlice[i]),
+			Value:    C.GoString(valueSlice[i]),
+			Domain:   C.GoString(domainSlice[i]),
+			Path:     C.GoString(pathSlice[i]),
+			HttpOnly: httpOnlySlice[i] != 0,
+			Secure:   secureSlice[i] != 0,
+		}
+		if exp := float64(expiresSlice[i]); exp >= 0 {
+			cookie.Expires = time.Unix(int64(exp), 0)
+		}
+		cookies = append(cookies, cookie)
+	}
+
+	ch <- macosCookieResult{cookies: cookies}
 }
 
 func (w *macosWebviewWindow) handleKeyEvent(acceleratorString string) {
@@ -1095,8 +1366,23 @@ func (w *macosWebviewWindow) setEnabled(enabled bool) {
 	C.windowSetEnabled(w.nsWindow, C.bool(enabled))
 }
 
-func (w *macosWebviewWindow) getCookies(url string) []*http.Cookie {
-	return nil
+func (w *macosWebviewWindow) getCookies(targetURL string) []*http.Cookie {
+	if w.nsWindow == nil || w.parent == nil || w.parent.isDestroyed() {
+		return nil
+	}
+
+	// URL validation is already done by the public GetCookies API.
+
+	requestID, ch := newMacosCookieRequest()
+	globalApplication.dispatchOnMainThread(func() {
+		cURL := C.CString(targetURL)
+		C.cookieRequestForWindow(w.nsWindow, C.uint(requestID), cURL)
+		C.free(unsafe.Pointer(cURL))
+	})
+
+	result := <-ch
+	removeMacosCookieRequest(requestID)
+	return result.cookies
 }
 
 func (w *macosWebviewWindow) execJS(js string) {

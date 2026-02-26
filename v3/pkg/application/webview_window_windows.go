@@ -3,9 +3,9 @@
 package application
 
 import (
-	"net/http"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -19,7 +19,7 @@ import (
 	"github.com/wailsapp/wails/v3/internal/assetserver"
 	"github.com/wailsapp/wails/v3/internal/assetserver/webview"
 	"github.com/wailsapp/wails/v3/internal/capabilities"
-	"github.com/wailsapp/wails/v3/internal/runtime"
+	wailsruntime "github.com/wailsapp/wails/v3/internal/runtime"
 	"github.com/wailsapp/wails/v3/internal/sliceutil"
 
 	"github.com/wailsapp/go-webview2/pkg/edge"
@@ -36,12 +36,6 @@ var edgeMap = map[string]uintptr{
 	"sw-resize": w32.HTBOTTOMLEFT,
 	"w-resize":  w32.HTLEFT,
 	"nw-resize": w32.HTTOPLEFT,
-}
-
-
-type cookieRequest struct {
-	url string
-	resultChan chan []*http.Cookie
 }
 
 type windowsWebviewWindow struct {
@@ -285,37 +279,32 @@ func (w *windowsWebviewWindow) setMaxSize(width, height int) {
 	w.parent.options.MaxHeight = height
 }
 
-func (w *windowsWebviewWindow) getCookies(url string) []*http.Cookie {
+func (w *windowsWebviewWindow) getCookies(targetURL string) []*http.Cookie {
 	if w.chromium == nil {
 		return nil
 	}
 
-	// Because GetCookies might be async and crash if called from a blocking WndProc,
-	// AND because the COM thread is the window thread,
-	// Let's try w.chromium.GetCookieManager() inside a goroutine and use InvokeSync? No, InvokeSync uses the main thread.
-	// We need to run on the window thread but NOT block it!
-	// Is there a way to use go-webview2's GetCookies safely?
-	// ACTUALLY, "GetCookies" does NOT return a value synchronously!
-	// Wait, if it does, how does go-webview2 do it?
-	// go-webview2 defines: func (i *ICoreWebView2CookieManager) GetCookies(uri string) (*ICoreWebView2CookieList, error)
-	// If it was async, it would take a callback. But it returns the list directly!
-	// It must be pumping messages.
-	// The problem is that Wails v3 ALSO pumps messages.
-	// If Wails v3 calls this from WndProc, maybe the re-entrant message pump corrupts Wails state and causes a segfault.
+	// GetCookies must run on the WebView2 UI thread and completes via COM callback.
+	resultChan := make(chan []*http.Cookie, 1)
 
-	// WHAT IF I DON'T USE SENDMESSAGE?
-	// What if I use PostMessage? But PostMessage is async and I need to return the cookies!
-	// We can use PostMessage, wait on a channel in the goroutine!
-	
-	req := &cookieRequest{
-		url: url,
-		resultChan: make(chan []*http.Cookie, 1),
-	}
-	
-	// Use w32.PostMessage which does NOT block the UI thread while we wait.
-	w32.PostMessage(w.hwnd, w32.WM_APP + 100, uintptr(unsafe.Pointer(req)), 0)
+	globalApplication.dispatchOnMainThread(func() {
+		cookieManager, err := w.chromium.GetCookieManager()
+		if err != nil {
+			globalApplication.error("getCookies: failed to get cookie manager: %v", err)
+			resultChan <- nil
+			return
+		}
+		defer cookieManager.Release()
 
-	return <-req.resultChan
+		handler := newCookiesCompletedHandler(resultChan)
+		if err := cookieManagerGetCookies(cookieManager, targetURL, handler); err != nil {
+			globalApplication.error("getCookies: GetCookies call failed: %v", err)
+			resultChan <- nil
+		}
+		// Result is sent by handler.Invoke; we do NOT send here.
+	})
+
+	return <-resultChan
 }
 
 func (w *windowsWebviewWindow) execJS(js string) {
@@ -1605,61 +1594,6 @@ func (w *windowsWebviewWindow) WndProc(msg uint32, wparam, lparam uintptr) uintp
 		}
 		return 0
 
-		case w32.WM_APP + 100:
-		// Handle custom cookie request
-		req := (*cookieRequest)(unsafe.Pointer(wparam))
-		
-		cm, err := w.chromium.GetCookieManager()
-		if err != nil {
-			fmt.Println("Error getting cookie manager inside WndProc:", err)
-			req.resultChan <- nil
-			return 0
-		}
-		defer cm.Release()
-
-		list, err := cm.GetCookies(req.url)
-		if err != nil {
-			req.resultChan <- nil
-			return 0
-		}
-		defer list.Release()
-
-		count, err := list.GetCount()
-		if err != nil {
-			req.resultChan <- nil
-			return 0
-		}
-
-		var found []*http.Cookie
-		for i := uint32(0); i < count; i++ {
-			cookie, err := list.GetItem(i)
-			if err != nil {
-				continue
-			}
-
-			name, _ := cookie.GetName()
-			value, _ := cookie.GetValue()
-			domain, _ := cookie.GetDomain()
-			path, _ := cookie.GetPath()
-			expires, _ := cookie.GetExpires()
-			isHttpOnly, _ := cookie.GetIsHttpOnly()
-			isSecure, _ := cookie.GetIsSecure()
-
-			found = append(found, &http.Cookie{
-				Name:     name,
-				Value:    value,
-				Domain:   domain,
-				Path:     path,
-				Expires:  time.Unix(int64(expires), 0),
-				HttpOnly: isHttpOnly,
-				Secure:   isSecure,
-			})
-			cookie.Release()
-		}
-		
-		req.resultChan <- found
-		return 0
-
 	case w32.WM_GETMINMAXINFO:
 		mmi := (*w32.MINMAXINFO)(unsafe.Pointer(lparam))
 		hasConstraints := false
@@ -2216,7 +2150,7 @@ func (w *windowsWebviewWindow) navigationCompleted(
 ) {
 
 	// Install the runtime core
-	w.execJS(runtime.Core(globalApplication.impl.GetFlags(globalApplication.options)))
+	w.execJS(wailsruntime.Core(globalApplication.impl.GetFlags(globalApplication.options)))
 
 	// Set the EnableFileDrop flag for this window (Windows-specific)
 	// The JS runtime checks this before processing file drops

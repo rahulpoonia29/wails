@@ -3,6 +3,7 @@ package application
 import (
 	"fmt"
 	"net/http"
+	neturl "net/url"
 	"runtime"
 	"slices"
 	"strings"
@@ -594,10 +595,21 @@ func (w *WebviewWindow) SetMaxSize(maxWidth, maxHeight int) Window {
 	return w
 }
 
-// GetCookies returns the cookies for the given URL
+// GetCookies returns cookies visible to this window's webview data store.
+// If url is empty, all cookies in the store are returned. If url is provided,
+// it must be an absolute URL (scheme required) or nil is returned.
+// The result is filtered using the platform's URL matching rules.
+// The call blocks until the underlying webview responds and returns nil on error
+// or if the window is destroyed.
 func (w *WebviewWindow) GetCookies(url string) []*http.Cookie {
 	if w.impl == nil || w.isDestroyed() {
 		return nil
+	}
+	if url != "" {
+		parsed, err := neturl.ParseRequestURI(url)
+		if err != nil || parsed.Scheme == "" {
+			return nil
+		}
 	}
 	return w.impl.getCookies(url)
 }

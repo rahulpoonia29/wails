@@ -52,8 +52,8 @@ var (
 	registered bool = false // avoid 'already registered message' about 'wails://'
 )
 
-func (w *linuxWebviewWindow) getCookies(url string) []*http.Cookie {
-	return nil
+func (w *linuxWebviewWindow) getCookies(targetURL string) []*http.Cookie {
+	return linuxGetCookies(w, targetURL)
 }
 
 func (w *linuxWebviewWindow) endDrag(button uint, x, y int) {
